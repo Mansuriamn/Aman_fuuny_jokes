@@ -1,3 +1,4 @@
+
 // const express = require('express');
 // const cors = require('cors');
 // const dotenv = require('dotenv');
@@ -9,11 +10,21 @@
 // const _dirname = path.resolve();
 // const app = express();
 
+// // In-memory cache to store the jokes
+// let jokesCache = {
+//   data: [],
+//   lastUpdated: null,
+//   isValid: false
+// };
+
+// // Cache duration in milliseconds (5 minutes)
+// const CACHE_DURATION = 5 * 60 * 1000;
+
 // app.use(express.json());
 // app.use(cors());
 // app.use(express.static(path.join(_dirname, "/frontend/dist")));
 
-// // Create MySQL connection pool instead of single connection
+// // Create MySQL connection pool
 // const pool = mysql.createPool({
 //   connectionLimit: 10,
 //   host: process.env.DB_HOST || 'localhost',
@@ -22,38 +33,89 @@
 //   database: process.env.DB_NAME || 'joke'
 // });
 
-// // Middleware to handle database errors
-// const handleDatabaseError = (err, req, res, next) => {
-//   console.error('Database error:', err);
-//   res.status(503).json({
-//     error: 'Database service temporarily unavailable',
-//     message: 'Please try again later'
+// // Function to check if cache is valid
+// const isCacheValid = () => {
+//   return jokesCache.isValid && 
+//          jokesCache.lastUpdated && 
+//          (Date.now() - jokesCache.lastUpdated) < CACHE_DURATION;
+// };
+
+// // Function to update cache
+// const updateCache = (data) => {
+//   jokesCache = {
+//     data: data,
+//     lastUpdated: Date.now(),
+//     isValid: true
+//   };
+// };
+
+// // Function to fetch jokes from database
+// const fetchJokesFromDB = () => {
+//   return new Promise((resolve, reject) => {
+//     pool.getConnection((err, connection) => {
+//       if (err) {
+//         console.error('Error getting database connection:', err);
+//         reject(err);
+//         return;
+//       }
+
+//       connection.query('SELECT * FROM jokes', (error, results) => {
+//         connection.release();
+        
+//         if (error) {
+//           reject(error);
+//           return;
+//         }
+
+//         resolve(results);
+//       });
+//     });
 //   });
 // };
 
-// app.get('/post', (req, res, next) => {
-//   pool.getConnection((err, connection) => {
-//     if (err) {
-//       console.error('Error getting database connection:', err);
-//       return next(err);
+// // Main route handler for jokes
+// app.get('/post', async (req, res) => {
+//   try {
+//     // First check if we have valid cached data
+//     if (isCacheValid()) {
+//       console.log('Serving from cache');
+//       return res.json(jokesCache.data);
 //     }
 
-//     connection.query('SELECT * FROM jokes', (error, results) => {
-//       // Always release the connection back to the pool
-//       connection.release();
+//     // If cache is invalid or expired, try to fetch from database
+//     const jokes = await fetchJokesFromDB();
+//     updateCache(jokes);
+    
+//     // Set cache headers
+//     res.set('Cache-Control', 'public, max-age=300'); // Cache for 5 minutes
+//     res.json(jokes);
 
-//       if (error) {
-//         return next(error);
-//       }
+//   } catch (error) {
+//     console.error('Error fetching jokes:', error);
+    
+//     // If database is down but we have cached data (even if expired), use it
+//     if (jokesCache.data.length > 0) {
+//       console.log('Database error, serving stale cache');
+//       res.set('Cache-Control', 'public, max-age=60'); // Shorter cache time for stale data
+//       return res.json(jokesCache.data);
+//     }
 
-//       // Set cache headers
-//       res.set('Cache-Control', 'public, max-age=300'); // Cache for 5 minutes
-//       res.json(results);
+//     // If we have no cached data, return error
+//     res.status(503).json({
+//       error: 'Service temporarily unavailable',
+//       message: 'Please try again later'
 //     });
-//   });
+//   }
 // });
 
-// app.use(handleDatabaseError);
+// // Error handling middleware
+// app.use((err, req, res, next) => {
+//   console.error('Server error:', err);
+//   res.status(500).json({
+//     error: 'Internal server error',
+//     message: 'Please try again later'
+//   });
+// });
 
 // // Catch-all route for frontend
 // app.get('*', (req, res) => {
@@ -64,8 +126,6 @@
 // app.listen(port, () => {
 //   console.log(`Server running at http://localhost:${port}`);
 // });
-
-
 
 
 
@@ -80,16 +140,6 @@ dotenv.config();
 const _dirname = path.resolve();
 const app = express();
 
-// In-memory cache to store the jokes
-let jokesCache = {
-  data: [],
-  lastUpdated: null,
-  isValid: false
-};
-
-// Cache duration in milliseconds (5 minutes)
-const CACHE_DURATION = 5 * 60 * 1000;
-
 app.use(express.json());
 app.use(cors());
 app.use(express.static(path.join(_dirname, "/frontend/dist")));
@@ -102,22 +152,6 @@ const pool = mysql.createPool({
   password: process.env.DB_PASSWORD || 'root',
   database: process.env.DB_NAME || 'joke'
 });
-
-// Function to check if cache is valid
-const isCacheValid = () => {
-  return jokesCache.isValid && 
-         jokesCache.lastUpdated && 
-         (Date.now() - jokesCache.lastUpdated) < CACHE_DURATION;
-};
-
-// Function to update cache
-const updateCache = (data) => {
-  jokesCache = {
-    data: data,
-    lastUpdated: Date.now(),
-    isValid: true
-  };
-};
 
 // Function to fetch jokes from database
 const fetchJokesFromDB = () => {
@@ -143,36 +177,18 @@ const fetchJokesFromDB = () => {
   });
 };
 
-// Main route handler for jokes
-app.get('/post', async (req, res) => {
+// Catch-all route for frontend
+app.get('/', async (req, res) => {
   try {
-    // First check if we have valid cached data
-    if (isCacheValid()) {
-      console.log('Serving from cache');
-      return res.json(jokesCache.data);
-    }
-
-    // If cache is invalid or expired, try to fetch from database
+    // Fetch the jokes from the database
     const jokes = await fetchJokesFromDB();
-    updateCache(jokes);
-    
-    // Set cache headers
-    res.set('Cache-Control', 'public, max-age=300'); // Cache for 5 minutes
-    res.json(jokes);
 
+    // Serve the jokes to the frontend
+    res.sendFile(path.resolve(_dirname, "frontend", "dist", "index.html"), { jokes: jokes });
   } catch (error) {
     console.error('Error fetching jokes:', error);
-    
-    // If database is down but we have cached data (even if expired), use it
-    if (jokesCache.data.length > 0) {
-      console.log('Database error, serving stale cache');
-      res.set('Cache-Control', 'public, max-age=60'); // Shorter cache time for stale data
-      return res.json(jokesCache.data);
-    }
-
-    // If we have no cached data, return error
-    res.status(503).json({
-      error: 'Service temporarily unavailable',
+    res.status(500).json({
+      error: 'Internal server error',
       message: 'Please try again later'
     });
   }
@@ -185,11 +201,6 @@ app.use((err, req, res, next) => {
     error: 'Internal server error',
     message: 'Please try again later'
   });
-});
-
-// Catch-all route for frontend
-app.get('*', (req, res) => {
-  res.sendFile(path.resolve(_dirname, "frontend", "dist", "index.html"));
 });
 
 const port = process.env.PORT || 3000;
